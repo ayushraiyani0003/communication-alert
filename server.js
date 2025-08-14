@@ -125,6 +125,13 @@ function logTCUCommunication(project, ncu, tcuNumber, timestamp) {
 
 // Log inactive TCUs and send message to WhatsApp
 async function logInactiveTCUs() {
+    if (isWithinInactiveTimeWindow()) {
+        console.log(
+            "❌ Inactivity checks are paused during the specified time window (7:00 PM to 6:00 AM IST)."
+        );
+        return; // Do not check for inactive TCUs during the time window
+    }
+
     const now = moment().tz(MQTT_TIMEZONE);
     const inactiveData = {};
 
@@ -234,8 +241,185 @@ function generateInactiveReportMessage(inactiveData) {
     return message;
 }
 
+// Function to check if current time is within the inactive period (7:00 PM to 6:00 AM IST)
+function isWithinInactiveTimeWindow() {
+    const now = moment().tz(MQTT_TIMEZONE);
+    const currentHour = now.hour(); // Get the current hour in the local time zone (IST)
+
+    // Check if the current time is between 7:00 PM (19:00) and 6:00 AM (06:00)
+    return currentHour >= 19 || currentHour < 6;
+}
+
 // Initialize tracking
 initializeTracking();
+// Generate comprehensive status report
+function generateStatusReport() {
+    const now = moment().tz(MQTT_TIMEZONE);
+    const filename = "status_report.log";
+    const timeStr = now.tz(LOG_TIMEZONE).format("YYYY-MM-DD HH:mm:ss UTC");
+
+    writeToLog(filename, `=== HOURLY STATUS REPORT at ${timeStr} ===`);
+
+    let totalTCUs = 0;
+    let activeTCUs = 0;
+    let inactiveTCUs = 0;
+    let neverReceivedTCUs = 0;
+
+    for (const project in projectConfig) {
+        for (const ncu in projectConfig[project]) {
+            const config = projectConfig[project][ncu];
+            const projectNCU = `${project}/${ncu}`;
+
+            writeToLog(
+                filename,
+                `\n📊 Project: ${project.toUpperCase()}, NCU: ${ncu}`
+            );
+            writeToLog(filename, `   Total Expected TCUs: ${config.totalTCUs}`);
+
+            // Get all TCUs that should be monitored
+            const expectedTCUs =
+                config.expectedTCUs.length > 0
+                    ? config.expectedTCUs
+                    : Array.from({ length: config.totalTCUs }, (_, i) => i + 1);
+
+            // Get all TCUs that have ever communicated
+            const communicatedTCUs =
+                lastReceived[project] && lastReceived[project][ncu]
+                    ? Object.keys(lastReceived[project][ncu]).map(Number)
+                    : [];
+
+            // Combine and get unique TCUs to check
+            const allTCUs = [
+                ...new Set([...expectedTCUs, ...communicatedTCUs]),
+            ].sort((a, b) => a - b);
+
+            const active = [];
+            const inactive = [];
+            const neverReceived = [];
+
+            for (const tcuNum of allTCUs) {
+                totalTCUs++;
+                const lastTime =
+                    lastReceived[project] &&
+                    lastReceived[project][ncu] &&
+                    lastReceived[project][ncu][tcuNum];
+
+                if (!lastTime) {
+                    neverReceived.push(tcuNum);
+                    neverReceivedTCUs++;
+                } else {
+                    const diffMinutes = now.diff(lastTime, "minutes");
+                    if (diffMinutes <= TIMEOUT_MINUTES) {
+                        active.push({
+                            tcu: tcuNum,
+                            lastSeen: diffMinutes,
+                            lastTime: lastTime
+                                .tz(LOG_TIMEZONE)
+                                .format("HH:mm:ss"),
+                        });
+                        activeTCUs++;
+                    } else {
+                        inactive.push({
+                            tcu: tcuNum,
+                            inactiveFor: diffMinutes,
+                            lastTime: lastTime
+                                .tz(LOG_TIMEZONE)
+                                .format("HH:mm:ss"),
+                        });
+                        inactiveTCUs++;
+                    }
+                }
+            }
+
+            // Log active TCUs
+            if (active.length > 0) {
+                writeToLog(filename, `   ✅ ACTIVE TCUs (${active.length}):`);
+                active.forEach((item) => {
+                    writeToLog(
+                        filename,
+                        `      TCU-${item.tcu}: Last seen ${item.lastSeen} min ago (${item.lastTime})`
+                    );
+                });
+            }
+
+            // Log inactive TCUs
+            if (inactive.length > 0) {
+                writeToLog(
+                    filename,
+                    `   ⚠️ INACTIVE TCUs (${inactive.length}):`
+                );
+                inactive.forEach((item) => {
+                    writeToLog(
+                        filename,
+                        `      TCU-${item.tcu}: Inactive for ${item.inactiveFor} min (Last: ${item.lastTime})`
+                    );
+                });
+            }
+
+            // Log never received TCUs
+            if (neverReceived.length > 0) {
+                writeToLog(
+                    filename,
+                    `   ❌ NEVER RECEIVED (${neverReceived.length}):`
+                );
+                neverReceived.forEach((tcuNum) => {
+                    writeToLog(
+                        filename,
+                        `      TCU-${tcuNum}: No data received`
+                    );
+                });
+            }
+
+            // Summary for this project/NCU
+            const activePercentage =
+                allTCUs.length > 0
+                    ? ((active.length / allTCUs.length) * 100).toFixed(1)
+                    : 0;
+            writeToLog(
+                filename,
+                `   📈 Summary: ${active.length} Active, ${inactive.length} Inactive, ${neverReceived.length} Never Received (${activePercentage}% active)`
+            );
+        }
+    }
+
+    // Overall summary
+    writeToLog(filename, `\n📊 OVERALL SUMMARY:`);
+    writeToLog(filename, `   Total TCUs Monitored: ${totalTCUs}`);
+    writeToLog(filename, `   Active: ${activeTCUs}`);
+    writeToLog(filename, `   Inactive: ${inactiveTCUs}`);
+    writeToLog(filename, `   Never Received: ${neverReceivedTCUs}`);
+
+    const overallActivePercentage =
+        totalTCUs > 0 ? ((activeTCUs / totalTCUs) * 100).toFixed(1) : 0;
+    writeToLog(
+        filename,
+        `   Overall Health: ${overallActivePercentage}% Active`
+    );
+
+    // System status
+    const uptime = process.uptime();
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    writeToLog(filename, `   System Uptime: ${hours}h ${minutes}m`);
+    writeToLog(
+        filename,
+        `   Next Check: ${now
+            .clone()
+            .add(60, "minutes")
+            .tz(LOG_TIMEZONE)
+            .format("HH:mm:ss UTC")}`
+    );
+
+    writeToLog(filename, "=== END STATUS REPORT ===\n");
+
+    console.log(
+        `📊 Status report generated at ${now
+            .tz(MQTT_TIMEZONE)
+            .format(
+                "HH:mm:ss"
+            )} - Active: ${activeTCUs}/${totalTCUs} (${overallActivePercentage}%)`
+    );
+}
 
 // Main execution function
 const main = async () => {
