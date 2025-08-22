@@ -91,7 +91,187 @@ const initializeWhatsApp = () => {
     });
 };
 
-// Send message to a single contact
+// Get all available groups
+const getAllGroups = async () => {
+    try {
+        if (!whatsappClient || !sessionState.isReady) {
+            throw new Error("WhatsApp client is not ready");
+        }
+
+        const chats = await whatsappClient.getChats();
+        const groups = chats.filter((chat) => chat.isGroup);
+
+        console.log("📋 Available Groups:");
+        console.log("====================");
+        groups.forEach((group, index) => {
+            console.log(
+                `${index + 1}. Name: "${group.name}" | ID: ${
+                    group.id._serialized
+                }`
+            );
+        });
+
+        return groups;
+    } catch (error) {
+        console.error("❌ Error getting groups:", error);
+        return [];
+    }
+};
+
+// Find group by name
+const findGroupByName = async (groupName) => {
+    try {
+        if (!whatsappClient || !sessionState.isReady) {
+            throw new Error("WhatsApp client is not ready");
+        }
+
+        const chats = await whatsappClient.getChats();
+        const group = chats.find(
+            (chat) =>
+                chat.isGroup &&
+                chat.name.toLowerCase().includes(groupName.toLowerCase())
+        );
+
+        if (group) {
+            console.log(
+                `✅ Found group: "${group.name}" | ID: ${group.id._serialized}`
+            );
+            return group;
+        } else {
+            console.log(
+                `❌ Group with name containing "${groupName}" not found`
+            );
+            return null;
+        }
+    } catch (error) {
+        console.error("❌ Error finding group:", error);
+        return null;
+    }
+};
+
+// Send message to a group by name
+const sendMessageToGroup = async (groupName, message) => {
+    try {
+        if (!whatsappClient || !sessionState.isReady) {
+            throw new Error("WhatsApp client is not ready");
+        }
+
+        // Find the group
+        const group = await findGroupByName(groupName);
+        if (!group) {
+            throw new Error(`Group "${groupName}" not found`);
+        }
+
+        console.log(`📤 Sending message to group: "${group.name}"`);
+
+        // Send the message
+        await whatsappClient.sendMessage(group.id._serialized, message);
+        console.log(`✅ Message sent successfully to group: "${group.name}"`);
+
+        return {
+            success: true,
+            groupName: group.name,
+            groupId: group.id._serialized,
+        };
+    } catch (error) {
+        console.error(
+            `❌ Failed to send message to group "${groupName}":`,
+            error.message
+        );
+        return { success: false, groupName, error: error.message };
+    }
+};
+
+// Send message to a group by ID
+const sendMessageToGroupById = async (groupId, message) => {
+    try {
+        if (!whatsappClient || !sessionState.isReady) {
+            throw new Error("WhatsApp client is not ready");
+        }
+
+        console.log(`📤 Sending message to group ID: ${groupId}`);
+
+        // Send the message
+        await whatsappClient.sendMessage(groupId, message);
+        console.log(`✅ Message sent successfully to group ID: ${groupId}`);
+
+        return { success: true, groupId };
+    } catch (error) {
+        console.error(
+            `❌ Failed to send message to group ID "${groupId}":`,
+            error.message
+        );
+        return { success: false, groupId, error: error.message };
+    }
+};
+
+// Send messages to multiple groups
+const sendBulkGroupMessages = async (groups, message) => {
+    try {
+        if (!whatsappClient || !sessionState.isReady) {
+            console.error(
+                "❌ WhatsApp client is not connected. Please initialize first."
+            );
+            return;
+        }
+
+        if (!groups || groups.length === 0) {
+            console.error("❌ No groups provided");
+            return;
+        }
+
+        console.log(
+            `📋 Starting bulk message sending to ${groups.length} groups...`
+        );
+        console.log(`⏱️  Delay between messages: 10 seconds\n`);
+
+        const results = [];
+
+        for (let i = 0; i < groups.length; i++) {
+            const groupName = groups[i];
+
+            console.log(
+                `\n📍 Processing group ${i + 1}/${
+                    groups.length
+                }: "${groupName}"`
+            );
+
+            const result = await sendMessageToGroup(groupName, message);
+            results.push(result);
+
+            // Wait 10 seconds before next message (except for the last message)
+            if (i < groups.length - 1) {
+                console.log("⏳ Waiting 10 seconds before next message...");
+                await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+        }
+
+        // Summary
+        console.log("\n📊 BULK GROUP MESSAGING SUMMARY:");
+        console.log("==================================");
+        const successful = results.filter((r) => r.success).length;
+        const failed = results.filter((r) => !r.success).length;
+
+        console.log(`✅ Successful: ${successful}`);
+        console.log(`❌ Failed: ${failed}`);
+        console.log(`📱 Total: ${results.length}`);
+
+        if (failed > 0) {
+            console.log("\n❌ Failed groups:");
+            results
+                .filter((r) => !r.success)
+                .forEach((r) => {
+                    console.log(`   "${r.groupName}": ${r.error}`);
+                });
+        }
+
+        return results;
+    } catch (error) {
+        console.error("❌ Error in bulk group messaging:", error);
+    }
+};
+
+// Send message to a single contact (keeping original function)
 const sendMessageToContact = async (phoneNumber, message) => {
     try {
         if (!whatsappClient || !sessionState.isReady) {
@@ -129,7 +309,7 @@ const sendMessageToContact = async (phoneNumber, message) => {
     }
 };
 
-// Main function to send bulk messages
+// Main function to send bulk messages to contacts (keeping original function)
 const sendBulkMessages = async (contacts, customMessage = null) => {
     try {
         if (!whatsappClient || !sessionState.isReady) {
@@ -200,27 +380,24 @@ const main = async () => {
         // Initialize WhatsApp
         await initializeWhatsApp();
 
-        // Example contacts array
-        // const contacts = [
-        //     {
-        //         phoneNo: "9876543210",
-        //         message: "Hello! This is a test message.",
-        //     },
-        //     { phoneNo: "9123456789", message: "Hi there! How are you today?" },
-        //     {
-        //         phoneNo: "9988776655",
-        //         message: "Custom message for this contact",
-        //     },
-        // ];
+        // Wait a moment for connection to stabilize
+        console.log("⏳ Waiting for connection to stabilize...");
+        await new Promise((resolve) => setTimeout(resolve, 3000));
 
-        // Send bulk messages
-        // await sendBulkMessages(contacts);
+        // Get all available groups (optional - to see what groups are available)
+        await getAllGroups();
 
-        // Example contacts array
-        const contacts = [{ phoneNo: "9712856834" }, { phoneNo: "9099792917" }];
+        // Example 1: Send message to a specific group by name
+        // const groupMessage =
+        //     "Hello everyone! This is a test message from the bot.";
+        // await sendMessageToGroup("NCU Updates", groupMessage);
 
-        // Optional: Send same message to all contacts
-        await sendBulkMessages(contacts, "Same message for everyone!");
+        // Example 2: Send message to multiple groups
+        // const groupNames = ["NCU Updates", "another group", "test group"];
+        // await sendBulkGroupMessages(groupNames, "Same message for all groups!");
+
+        // Example 3: Send message to group by exact ID (if you know the group ID)
+        // await sendMessageToGroupById("120363123456789012@g.us", "Message by group ID");
     } catch (error) {
         console.error("❌ Main execution error:", error);
     }
@@ -231,9 +408,16 @@ module.exports = {
     initializeWhatsApp,
     sendBulkMessages,
     sendMessageToContact,
+    sendMessageToGroup,
+    sendMessageToGroupById,
+    sendBulkGroupMessages,
+    getAllGroups,
+    findGroupByName,
+    whatsappClient,
+    sessionState,
 };
 
 // Run if this file is executed directly
-// if (require.main === module) {
-//     main();
-// }
+if (require.main === module) {
+    main();
+}

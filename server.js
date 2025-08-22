@@ -3,7 +3,12 @@ const mqtt = require("mqtt");
 const moment = require("moment-timezone");
 const fs = require("fs-extra");
 const path = require("path");
-const { sendBulkMessages, initializeWhatsApp } = require("./whatsapp_send"); // Update with correct path to your WhatsApp script
+const {
+    sendBulkMessages,
+    initializeWhatsApp,
+    sendMessageToGroup,
+    sendBulkGroupMessages,
+} = require("./whatsapp_send"); // Update with correct path to your WhatsApp script
 
 // MQTT connection details
 const host = "mqtt.sunchaser.cloud";
@@ -16,6 +21,19 @@ const topics = [
     "jsm-pub/rabarika_2172-A/STATUS",
     "jsm-pub/bhojabedi-2240/STATUS",
 ];
+
+// WhatsApp configuration
+const WHATSAPP_CONFIG = {
+    // Groups to send messages to
+    alertGroups: ["NCU Updates"], // Add your group names here
+
+    // Individual contacts for critical alerts
+    emergencyContacts: [],
+
+    // Message preferences
+    useGroups: true, // Set to false to use individual contacts only
+    sendToEmergencyContacts: false, // Always send to emergency contacts for critical alerts
+};
 
 // Project and NCU configuration
 const projectConfig = {
@@ -123,6 +141,49 @@ function logTCUCommunication(project, ncu, tcuNumber, timestamp) {
     writeToLog(filename, data);
 }
 
+// Send WhatsApp notification (supports both groups and individual contacts)
+async function sendWhatsAppNotification(message, isEmergency = false) {
+    try {
+        const promises = [];
+
+        // Send to groups if enabled
+        if (
+            WHATSAPP_CONFIG.useGroups &&
+            WHATSAPP_CONFIG.alertGroups.length > 0
+        ) {
+            console.log("📱 Sending to WhatsApp groups...");
+            promises.push(
+                sendBulkGroupMessages(WHATSAPP_CONFIG.alertGroups, message)
+            );
+        }
+
+        // Send to emergency contacts for critical alerts or if groups are disabled
+        if (
+            isEmergency ||
+            WHATSAPP_CONFIG.sendToEmergencyContacts ||
+            !WHATSAPP_CONFIG.useGroups
+        ) {
+            if (WHATSAPP_CONFIG.emergencyContacts.length > 0) {
+                console.log("📱 Sending to emergency contacts...");
+                promises.push(
+                    sendBulkMessages(WHATSAPP_CONFIG.emergencyContacts, message)
+                );
+            }
+        }
+
+        // Wait for all messages to be sent
+        await Promise.all(promises);
+        console.log("✅ WhatsApp notifications sent successfully");
+    } catch (error) {
+        console.error("❌ Error sending WhatsApp notification:", error);
+        // Log the error but don't stop the monitoring
+        writeToLog(
+            "whatsapp_errors.log",
+            `Failed to send WhatsApp notification: ${error.message}`
+        );
+    }
+}
+
 // Log inactive TCUs and send message to WhatsApp
 async function logInactiveTCUs() {
     if (isWithinInactiveTimeWindow()) {
@@ -213,11 +274,10 @@ async function logInactiveTCUs() {
         }
         writeToLog(filename, "=== END REPORT ===\n");
 
-        // Send inactive TCU details to a specific phone number
+        // Generate and send WhatsApp message
         const inactiveReportMessage =
             generateInactiveReportMessage(inactiveData);
-        const contacts = [{ phoneNo: "7600006306" }, { phoneNo: "7575068682" }]; // Replace with recipient's phone number
-        await sendBulkMessages(contacts, inactiveReportMessage); // Send message
+        await sendWhatsAppNotification(inactiveReportMessage, true); // Mark as emergency
     } else {
         console.log("\n✅ All TCUs are active. No inactive TCUs detected.");
     }
@@ -225,19 +285,33 @@ async function logInactiveTCUs() {
 
 // Function to generate a readable message from inactive TCU data
 function generateInactiveReportMessage(inactiveData) {
-    let message = "⚠️ Inactive TCU Report ⚠️\n\n";
+    const now = moment().tz(MQTT_TIMEZONE);
+    let message = "🚨 *INACTIVE TCU ALERT* 🚨\n\n";
+    message += `📅 Time: ${now.format("DD/MM/YYYY HH:mm:ss IST")}\n\n`;
+
+    let totalInactive = 0;
+
     for (const projectNCU in inactiveData) {
         const [project, ncu] = projectNCU.split("/");
-        message += `Project: ${project}, NCU: ${ncu}\n`;
+        message += `🏗️ *Project:* ${project.toUpperCase()}\n`;
+        message += `🔧 *NCU:* ${ncu}\n`;
+        message += `❌ *Inactive TCUs:*\n`;
+
         inactiveData[projectNCU].forEach((item) => {
+            totalInactive++;
             const status =
                 item.status === "NEVER_RECEIVED"
-                    ? "NEVER RECEIVED DATA"
-                    : `TIMEOUT (${item.minutesInactive} min)`;
-            message += `  TCPU-${item.tcu}: ${status}\n`;
+                    ? "NEVER RECEIVED"
+                    : `${item.minutesInactive} min ago`;
+            message += `   • TCU-${item.tcu}: ${status}\n`;
         });
         message += "\n";
     }
+
+    message += `📊 *Total Inactive:* ${totalInactive} TCUs\n`;
+    message += `⚠️ *Timeout Limit:* ${TIMEOUT_MINUTES} minutes\n\n`;
+    message += `🔄 Next check in ${CHECK_INTERVAL} minutes`;
+
     return message;
 }
 
@@ -252,6 +326,7 @@ function isWithinInactiveTimeWindow() {
 
 // Initialize tracking
 initializeTracking();
+
 // Generate comprehensive status report
 function generateStatusReport() {
     const now = moment().tz(MQTT_TIMEZONE);
@@ -421,14 +496,125 @@ function generateStatusReport() {
     );
 }
 
+// Send daily summary to WhatsApp
+async function sendDailySummary() {
+    try {
+        const now = moment().tz(MQTT_TIMEZONE);
+        let totalTCUs = 0;
+        let activeTCUs = 0;
+        let inactiveTCUs = 0;
+        let neverReceivedTCUs = 0;
+
+        for (const project in projectConfig) {
+            for (const ncu in projectConfig[project]) {
+                const config = projectConfig[project][ncu];
+
+                // Get all TCUs that should be monitored
+                const expectedTCUs =
+                    config.expectedTCUs.length > 0
+                        ? config.expectedTCUs
+                        : Array.from(
+                              { length: config.totalTCUs },
+                              (_, i) => i + 1
+                          );
+
+                // Get all TCUs that have ever communicated
+                const communicatedTCUs =
+                    lastReceived[project] && lastReceived[project][ncu]
+                        ? Object.keys(lastReceived[project][ncu]).map(Number)
+                        : [];
+
+                // Combine and get unique TCUs to check
+                const allTCUs = [
+                    ...new Set([...expectedTCUs, ...communicatedTCUs]),
+                ];
+
+                for (const tcuNum of allTCUs) {
+                    totalTCUs++;
+                    const lastTime =
+                        lastReceived[project] &&
+                        lastReceived[project][ncu] &&
+                        lastReceived[project][ncu][tcuNum];
+
+                    if (!lastTime) {
+                        neverReceivedTCUs++;
+                    } else {
+                        const diffMinutes = now.diff(lastTime, "minutes");
+                        if (diffMinutes <= TIMEOUT_MINUTES) {
+                            activeTCUs++;
+                        } else {
+                            inactiveTCUs++;
+                        }
+                    }
+                }
+            }
+        }
+
+        const overallActivePercentage =
+            totalTCUs > 0 ? ((activeTCUs / totalTCUs) * 100).toFixed(1) : 0;
+
+        const summaryMessage =
+            `📊 *DAILY SYSTEM SUMMARY*\n\n` +
+            `📅 Date: ${now.format("DD/MM/YYYY")}\n` +
+            `🕐 Time: ${now.format("HH:mm:ss IST")}\n\n` +
+            `🏗️ *TCU Status Overview:*\n` +
+            `✅ Active: ${activeTCUs}\n` +
+            `⚠️ Inactive: ${inactiveTCUs}\n` +
+            `❌ Never Received: ${neverReceivedTCUs}\n` +
+            `📊 Total Monitored: ${totalTCUs}\n\n` +
+            `📈 *Overall Health: ${overallActivePercentage}%*\n\n` +
+            `🔧 *System Info:*\n` +
+            `⏰ Timeout Limit: ${TIMEOUT_MINUTES} minutes\n` +
+            `🔄 Check Interval: ${CHECK_INTERVAL} minutes\n` +
+            `⏸️ Night Mode: 7PM - 6AM IST`;
+
+        // Send summary to groups only (not emergency contacts)
+        if (
+            WHATSAPP_CONFIG.useGroups &&
+            WHATSAPP_CONFIG.alertGroups.length > 0
+        ) {
+            await sendBulkGroupMessages(
+                WHATSAPP_CONFIG.alertGroups,
+                summaryMessage
+            );
+            console.log("📱 Daily summary sent to WhatsApp groups");
+        }
+    } catch (error) {
+        console.error("❌ Error sending daily summary:", error);
+        writeToLog(
+            "whatsapp_errors.log",
+            `Failed to send daily summary: ${error.message}`
+        );
+    }
+}
+
 // Main execution function
 const main = async () => {
     try {
+        console.log("🚀 Starting MQTT Monitor with WhatsApp Integration...");
+
         // Initialize WhatsApp first
+        console.log("📱 Initializing WhatsApp...");
         await initializeWhatsApp();
+        console.log("✅ WhatsApp initialized successfully");
+
+        // Send startup notification
+        const startupMessage =
+            `🟢 *MQTT Monitor Started*\n\n` +
+            `📅 ${moment()
+                .tz(MQTT_TIMEZONE)
+                .format("DD/MM/YYYY HH:mm:ss IST")}\n\n` +
+            `🔧 *Configuration:*\n` +
+            `• Monitored Projects: ${Object.keys(projectConfig).length}\n` +
+            `• MQTT Topics: ${topics.length}\n` +
+            `• Timeout: ${TIMEOUT_MINUTES} min\n` +
+            `• Check Interval: ${CHECK_INTERVAL} min\n\n` +
+            `✅ System is now monitoring TCUs...`;
+
+        await sendWhatsAppNotification(startupMessage);
 
         // Connect to MQTT after WhatsApp is initialized
-        console.log(`Connecting to MQTT broker: ${host}`);
+        console.log(`🌐 Connecting to MQTT broker: ${host}`);
         const client = mqtt.connect(`mqtt://${host}`, {
             username,
             password,
@@ -481,7 +667,39 @@ const main = async () => {
             );
         });
 
-        // Monitor inactive TCUs and generate reports
+        // Handle MQTT connection errors
+        client.on("error", async (error) => {
+            console.error("❌ MQTT connection error:", error);
+            const errorMessage =
+                `🚨 *MQTT CONNECTION ERROR*\n\n` +
+                `⚠️ Error: ${error.message}\n` +
+                `📅 Time: ${moment()
+                    .tz(MQTT_TIMEZONE)
+                    .format("DD/MM/YYYY HH:mm:ss IST")}\n\n` +
+                `🔄 System will attempt to reconnect automatically.`;
+
+            await sendWhatsAppNotification(errorMessage, true);
+        });
+
+        // Handle MQTT disconnection
+        client.on("offline", async () => {
+            console.log("🔌 MQTT client went offline");
+            const offlineMessage =
+                `⚠️ *MQTT CLIENT OFFLINE*\n\n` +
+                `📅 Time: ${moment()
+                    .tz(MQTT_TIMEZONE)
+                    .format("DD/MM/YYYY HH:mm:ss IST")}\n\n` +
+                `🔄 Attempting to reconnect...`;
+
+            await sendWhatsAppNotification(offlineMessage, true);
+        });
+
+        // Handle MQTT reconnection
+        client.on("reconnect", async () => {
+            console.log("🔄 MQTT client reconnecting...");
+        });
+
+        // Monitor inactive TCUs
         setInterval(() => {
             logInactiveTCUs();
         }, CHECK_INTERVAL * 60 * 1000);
@@ -490,8 +708,44 @@ const main = async () => {
         setInterval(() => {
             generateStatusReport();
         }, 60 * 60 * 1000);
+
+        // Send daily summary at 9 AM IST
+        setInterval(() => {
+            const now = moment().tz(MQTT_TIMEZONE);
+            if (now.hour() === 9 && now.minute() === 0) {
+                sendDailySummary();
+            }
+        }, 60 * 1000); // Check every minute
+
+        console.log("✅ MQTT Monitor with WhatsApp integration is running!");
+        console.log(
+            `📱 WhatsApp notifications configured for groups: ${WHATSAPP_CONFIG.alertGroups.join(
+                ", "
+            )}`
+        );
+        console.log(
+            `📞 Emergency contacts: ${WHATSAPP_CONFIG.emergencyContacts.length} numbers`
+        );
     } catch (error) {
         console.error("❌ Main execution error:", error);
+
+        // Try to send error notification
+        try {
+            const errorMessage =
+                `🚨 *SYSTEM STARTUP ERROR*\n\n` +
+                `❌ Error: ${error.message}\n` +
+                `📅 Time: ${moment()
+                    .tz(MQTT_TIMEZONE)
+                    .format("DD/MM/YYYY HH:mm:ss IST")}\n\n` +
+                `⚠️ System may not be functioning properly.`;
+
+            await sendWhatsAppNotification(errorMessage, true);
+        } catch (notificationError) {
+            console.error(
+                "❌ Could not send error notification:",
+                notificationError
+            );
+        }
     }
 };
 
